@@ -3,28 +3,28 @@
             [clojure.set :as set]))
 
 (defn- make-callback
-  [url key counts]
+  [url key assets asset]
   (fn [_]
     (println (name key) url)
-    (swap! counts update key inc)))
+    (swap! assets assoc key asset)))
 
-(defn- url-to-img [url counts]
+(defn- url-to-img [url assets]
   (let [img (js/Image.)]
-    (set! (.-onload img) (make-callback url :loaded counts))
-    (set! (.-onerror img) (make-callback url :error counts))
+    (set! (.-onload img) (make-callback url :loaded assets img))
+    (set! (.-onerror img) (make-callback url :error assets img))
     (set! (.-src img) url)
-    img))
+    :loading))
 
-(defn- url-to-audio [url counts]
+(defn- url-to-audio [url assets]
   (let [audio (js/Audio. url)]
-    (.addEventListener audio "canplaythrough" (make-callback url :loaded counts))
-    (set! (.-onerror audio) (make-callback url :error counts))
-    audio))
+    (.addEventListener audio "canplaythrough" (make-callback url :loaded assets audio))
+    (set! (.-onerror audio) (make-callback url :error assets audio))
+    :loading))
 
-(defn- dispatch-load [[type val] counts]
+(defn- dispatch-load [[type val] assets]
   (case type 
-    :image (url-to-img val counts)
-    :audio (url-to-audio val counts)))
+    :image (url-to-img val assets)
+    :audio (url-to-audio val assets)))
 
 (defn- draw-loading [ctx]
   (let [w (.. ctx -canvas -width)
@@ -35,22 +35,9 @@
     (.fillText ctx "Loading..." (/ w 2) (/ h 2))
     (set! (.-textAlign ctx) old-ta)))
 
-(defn- asset-loader
-  ([ctx done-fn assets]
-   (let [counts (atom {:loaded 0
-                       :error 0
-                       :total (count assets)})
-         to-images (into {} (map (fn [[k v]] [k (dispatch-load v counts)]) assets))]
-     (draw-loading ctx)
-     (js/requestAnimationFrame (fn [_] (asset-loader ctx done-fn to-images counts)))))
-  ([ctx done-fn assets counts]
-   (let [{:keys [loaded error total]} @counts]
-     (if (= (+ loaded error)
-            total)
-       (done-fn assets)
-       (do 
-         (draw-loading ctx)
-         (js/requestAnimationFrame (fn [_] (asset-loader ctx done-fn assets counts))))))))
+(defn- load-assets [urls assets]
+  (into {} (map (fn [[k v]] [k (dispatch-load v assets)]) urls)))
+
 
 (defn- handle-audio [state assets audio-state to-play]
   (let [curr-state (deref audio-state)
@@ -75,44 +62,18 @@
       (.play m))
     (reset! audio-state pruned-state)))
 
-(defn- game-loop! [t ctx key-evs state assets audio-state {:keys [on-key on-tick to-play to-draw] :as handlers}]
+(defn- game-loop! [t ctx key-evs state assets-fn assets audio-state {:keys [on-key on-tick to-play to-draw] :as handlers}]
   (let [new-state (-> state
                       (on-key @key-evs)
-                      (on-tick t))]
+                      (on-tick t))
+        asset-urls (assets-fn new-state)
+        new-asset-keys (clojure.set/difference (set (keys asset-urls))
+                                               (set (keys @assets)))
+        new-assets (load-assets (select-keys asset-urls new-asset-keys) assets)]
+    (swap! assets merge new-assets)
     (.clearRect ctx 0 0 (.. ctx -canvas -width) (.. ctx -canvas -height))
-    (handle-audio state assets audio-state to-play)
-    (render! ctx (to-draw new-state assets))
-    (js/requestAnimationFrame (fn [t] (game-loop! t ctx key-evs new-state assets audio-state handlers)))))
+    (handle-audio state new-assets audio-state to-play)
+    (render! ctx (to-draw new-state new-assets))
+    (js/requestAnimationFrame (fn [t] (game-loop! t ctx key-evs new-state assets-fn assets audio-state handlers)))))
 
-(defn start!
-  "Initiates the main game loop. Expects a map of handler functions with the following keys:
-  ```clj
-  {:init (fn [] state) 
-     A function that returns the initial game state, run before the loop starts
-   :assets (fn [] assets)
-     A function that returns a map of keys to asset type/url pairs, to be loaded into memory.
-   :on-key (fn [state keys] state)
-     A function that takes the current game state, and a set of current key codes pressed, and returns a new
-     game state
-   :on-tick (fn [state time] state)
-     A function that takes the current game state, and a DOMHighResTimeStamp, indicating the number of ms since 
-     time origin (https://developer.mozilla.org/en-US/docs/Web/API/DOMHighResTimeStamp#The_time_origin).
-     Runs every frame, approx. 60fps. Returns a new game state.
-   :to-play (fn [state assets] sound-state)
-     A function that taks the current state, assets, and a boolean indicating if music is currently playing
-     and returns a map describing sounds to play, in the form:
-     `{:music <sound asset to loop or :stop> :effects [<sound assets to play once>]}`. If the :music key is empty,
-     any currently playing sound will continue.
-   :to-draw (fn [state assets] graphics-state)
-     A function that takes the current game state, and returns a DDN vector
-  ```"
-  [{:keys [init assets] :as handlers}]
-  (let [canvas (js/document.getElementById "game")
-        ctx (.getContext canvas "2d")
-        key-evs (atom #{})
-        init-state (init)
-        audio-state (atom {:music #{} :effects #{}})
-        done-fn (fn [assets-loaded] (game-loop! 0 ctx key-evs init-state assets-loaded audio-state handlers))]
-    (set! js/window.onkeyup (fn [e] (.preventDefault e) (swap! key-evs disj (.-code e))))
-    (set! js/window.onkeydown (fn [e] (.preventDefault e) (swap! key-evs conj (.-code e))))
-    (asset-loader ctx done-fn (assets))))
+(defn start! game-loop)
